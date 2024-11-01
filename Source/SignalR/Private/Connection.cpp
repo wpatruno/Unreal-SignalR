@@ -28,7 +28,6 @@
 #include "WebSocketsModule.h"
 #include "SignalRModule.h"
 #include "Interfaces/IHttpResponse.h"
-#include "Interfaces/IHttpRequest.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
@@ -41,7 +40,7 @@ FConnection::FConnection(const FString& InHost, const TMap<FString, FString>& In
 
 void FConnection::Connect()
 {
-    Negotiate();
+    StartWebSocket();
 }
 
 bool FConnection::IsConnected()
@@ -53,6 +52,7 @@ void FConnection::Send(const FString& Data)
 {
     if (Connection.IsValid())
     {
+        UE_LOG(LogSignalR, Warning, TEXT("Send: %s"), *Data);
         Connection->Send(Data);
     }
     else
@@ -63,7 +63,7 @@ void FConnection::Send(const FString& Data)
 
 void FConnection::Close(int32 Code, const FString& Reason)
 {
-    if(Connection.IsValid())
+    if (Connection.IsValid())
     {
         Connection->Close(Code, Reason);
     }
@@ -112,7 +112,8 @@ void FConnection::Negotiate()
     HttpRequest->ProcessRequest();
 }
 
-void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePtr InResponse, bool bConnectedSuccessfully)
+void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePtr InResponse,
+                                      bool bConnectedSuccessfully)
 {
     if (!bConnectedSuccessfully)
     {
@@ -122,7 +123,7 @@ void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePt
         return;
     }
 
-    if(InResponse->GetResponseCode() != 200)
+    if (InResponse->GetResponseCode() != 200)
     {
         UE_LOG(LogSignalR, Error, TEXT("Negotiate failed with status code %d"), InResponse->GetResponseCode());
         return;
@@ -133,7 +134,7 @@ void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePt
 
     if (FJsonSerializer::Deserialize(JsonReader, JsonObject) && JsonObject.IsValid())
     {
-        if(JsonObject->HasField(TEXT("error")))
+        if (JsonObject->HasField(TEXT("error")))
         {
             // TODO
         }
@@ -141,7 +142,10 @@ void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePt
         {
             if (JsonObject->HasField(TEXT("ProtocolVersion")))
             {
-                UE_LOG(LogSignalR, Error, TEXT("Detected a connection attempt to an ASP.NET SignalR Server. This client only supports connecting to an ASP.NET Core SignalR Server. See https://aka.ms/signalr-core-differences for details."));
+                UE_LOG(LogSignalR, Error,
+                       TEXT(
+                           "Detected a connection attempt to an ASP.NET SignalR Server. This client only supports connecting to an ASP.NET Core SignalR Server. See https://aka.ms/signalr-core-differences for details."
+                       ));
                 return;
             }
 
@@ -159,14 +163,18 @@ void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePt
                 bool bIsCompatible = false;
                 for (TSharedPtr<FJsonValue> TransportData : JsonObject->GetArrayField(TEXT("availableTransports")))
                 {
-                    if(TransportData.IsValid() && TransportData->Type == EJson::Object)
+                    if (TransportData.IsValid() && TransportData->Type == EJson::Object)
                     {
                         TSharedPtr<FJsonObject> TransportObj = TransportData->AsObject();
-                        if(TransportObj->HasTypedField<EJson::String>(TEXT("transport")) && TransportObj->GetStringField(TEXT("transport")) == TEXT("WebSockets") && TransportObj->HasTypedField<EJson::Array>(TEXT("transferFormats")))
+                        if (TransportObj->HasTypedField<EJson::String>(TEXT("transport")) && TransportObj->
+                            GetStringField(TEXT("transport")) == TEXT("WebSockets") && TransportObj->HasTypedField<
+                                EJson::Array>(TEXT("transferFormats")))
                         {
-                            for (TSharedPtr<FJsonValue> TransportFormatData : TransportObj->GetArrayField(TEXT("transferFormats")))
+                            for (TSharedPtr<FJsonValue> TransportFormatData : TransportObj->GetArrayField(
+                                     TEXT("transferFormats")))
                             {
-                                if (TransportFormatData.IsValid() && TransportFormatData->Type == EJson::String && TransportFormatData->AsString() == TEXT("Text"))
+                                if (TransportFormatData.IsValid() && TransportFormatData->Type == EJson::String &&
+                                    TransportFormatData->AsString() == TEXT("Text"))
                                 {
                                     bIsCompatible = true;
                                 }
@@ -175,9 +183,12 @@ void FConnection::OnNegotiateResponse(FHttpRequestPtr InRequest, FHttpResponsePt
                     }
                 }
 
-                if(!bIsCompatible)
+                if (!bIsCompatible)
                 {
-                    UE_LOG(LogSignalR, Error, TEXT("The server does not support WebSockets which is currently the only transport supported by this client."));
+                    UE_LOG(LogSignalR, Error,
+                           TEXT(
+                               "The server does not support WebSockets which is currently the only transport supported by this client."
+                           ));
                     return;
                 }
             }
@@ -206,7 +217,7 @@ void FConnection::StartWebSocket()
     const FString COnver = ConvertToWebsocketUrl(Host);
     Connection = FWebSocketsModule::Get().CreateWebSocket(COnver, FString(), Headers);
 
-    if(Connection.IsValid())
+    if (Connection.IsValid())
     {
         Connection->OnConnected().AddLambda([Self = TWeakPtr<FConnection>(AsShared())]()
         {
@@ -224,19 +235,21 @@ void FConnection::StartWebSocket()
                 SharedSelf->OnConnectionErrorEvent.Broadcast(ErrString);
             }
         });
-        Connection->OnClosed().AddLambda([Self = TWeakPtr<FConnection>(AsShared())](int32 StatusCode, const FString& Reason, bool bWasClean)
-        {
-            if (TSharedPtr<FConnection> SharedSelf = Self.Pin())
+        Connection->OnClosed().AddLambda(
+            [Self = TWeakPtr<FConnection>(AsShared())](int32 StatusCode, const FString& Reason, bool bWasClean)
             {
-                SharedSelf->OnClosedEvent.Broadcast(StatusCode, Reason, bWasClean);
-            }
-        });
+                if (TSharedPtr<FConnection> SharedSelf = Self.Pin())
+                {
+                    SharedSelf->OnClosedEvent.Broadcast(StatusCode, Reason, bWasClean);
+                }
+            });
         Connection->OnMessage().AddLambda([Self = TWeakPtr<FConnection>(AsShared())](const FString& MessageString)
         {
             if (TSharedPtr<FConnection> SharedSelf = Self.Pin())
             {
                 SharedSelf->OnMessageEvent.Broadcast(MessageString);
             }
+            UE_LOG(LogSignalR, Verbose, TEXT("OnMessage: %s"), *MessageString);
         });
 
         Connection->Connect();
@@ -255,12 +268,9 @@ FString FConnection::ConvertToWebsocketUrl(const FString& Url)
     {
         return TEXT("wss") + TrimmedUrl.RightChop(5);
     }
-    else if (TrimmedUrl.StartsWith(TEXT("http://")))
+    if (TrimmedUrl.StartsWith(TEXT("http://")))
     {
         return TEXT("ws") + TrimmedUrl.RightChop(4);
     }
-    else
-    {
-        return Url;
-    }
+    return Url;
 }
